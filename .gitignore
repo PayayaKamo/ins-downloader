@@ -1,0 +1,31 @@
+# ---- Downloaded media / unrelated projects (never commit) ----
+namoridane/
+namoridane-repo/
+downloads/
+tmp/
+*.zip
+
+# ---- Local scratch and one-off analysis scripts ----
+tmp_*.py
+test_probe.py
+
+# ---- Python artifacts ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---- Credentials and session data ----
+.env
+cookies.txt
+session-*
+*.session
+
+# ---- Logs, caches, OS noise ----
+*.log
+logs/
+.cache/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,5 @@
+# Required runtime dependency
+instaloader>=4.10
+
+# Optional: reuse an existing browser login (--cookies-from-browser)
+# browser-cookie3>=0.19

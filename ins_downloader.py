@@ -186,7 +186,9 @@ def do_login(loader: instaloader.Instaloader, args) -> None:
     loaded = False
     try:
         loader.load_session_from_file(user, args.session_file)
-        loaded = loader.test_login() is not None
+        # 有限流风险时 test_login 的 GraphQL 校验本身会返回 429；
+        # 会话文件能加载即视为可用，真正的鉴权问题会在下载时暴露。
+        loaded = True
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -195,6 +197,11 @@ def do_login(loader: instaloader.Instaloader, args) -> None:
     if not loaded:
         password = args.password or os.environ.get("INS_PASSWORD")
         if not password:
+            if not sys.stdin.isatty():
+                raise SystemExit(
+                    f"[x] 没有可用的登录态文件: {args.session_file or '默认路径'}；"
+                    "非交互运行请先准备 session 文件并用 --session-file 指定。"
+                )
             password = getpass.getpass(f"{user} 的 Instagram 密码: ")
         try:
             loader.login(user, password)
@@ -205,6 +212,24 @@ def do_login(loader: instaloader.Instaloader, args) -> None:
         print(f"[+] 已登录: {user}（登录态已保存，下次免密）")
     else:
         print(f"[+] 使用已保存的登录态: {user}")
+
+
+def apply_web_headers(loader: instaloader.Instaloader, referer: str = "https://www.instagram.com/") -> None:
+    """伪装成浏览器 Web 请求，规避 GraphQL 接口的 feedback_required 拦截。"""
+    version = "143.0.3650.139"
+    loader.context._session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{version} Safari/537.36 Edg/{version}"
+        ),
+        "x-ig-www-claim": "0",
+        "x-asbd-id": "129477",
+        "sec-ch-ua": '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Referer": referer,
+        "Origin": "https://www.instagram.com",
+    })
 
 
 def parse_day(value: str, opt: str) -> datetime:
@@ -271,6 +296,8 @@ def save_index(path: Path, rows: dict) -> None:
 
 def download_profile(args, loader, username: str) -> int:
     print(f"\n=== @{username} ===")
+    if args.login:
+        apply_web_headers(loader, f"https://www.instagram.com/{username}/")
     try:
         profile = instaloader.Profile.from_username(loader.context, username)
     except instaloader.ProfileNotExistsException:
@@ -282,12 +309,28 @@ def download_profile(args, loader, username: str) -> int:
         return 1
 
     print(f"昵称: {profile.full_name}")
-    total_posts = profile.mediacount if profile.mediacount is not None else "未知"
-    print(f"粉丝: {profile.followers} | 帖子: {total_posts} | 私密: {profile.is_private}")
+    media_count = safe(lambda: profile.mediacount)
+    followers = safe(lambda: profile.followers)
+    is_private = safe(lambda: profile.is_private, False)
+    total_posts = media_count if media_count is not None else "未知"
+    print(f"粉丝: {followers if followers is not None else '未知'} | 帖子: {total_posts} | 私密: {is_private}")
 
-    if profile.is_private and not loader.test_login():
+    if is_private and not loader.test_login():
         print("[x] 这是私密账号，需要用 --login 登录已关注的账号后再下载。")
         return 1
+
+    # 头像/计数这类元数据走 graphql/query，容易被 feedback_required 拦截；
+    # 帖子列表走 api/graphql，通常仍可用。用最小元数据兜底，避免整轮下载被计数接口拖垮。
+    if not getattr(profile, "_has_full_metadata", False):
+        node = dict(getattr(profile, "_node", None) or {})
+        node.setdefault("username", profile.username)
+        node.setdefault("is_private", False)
+        node.setdefault("id", node.get("pk") or node.get("userid"))
+        node.setdefault("pk", node.get("id"))
+        node.setdefault("friendship_status", {"following": True})
+        profile._node = node
+        profile._has_full_metadata = True
+        print("[i] 元数据接口受限，已改用页面数据继续。")
 
     outdir = Path(args.output).expanduser().resolve() / username
     outdir.mkdir(parents=True, exist_ok=True)
@@ -465,6 +508,8 @@ def main() -> int:
         if args.cookies_from_browser:
             apply_browser_cookies(loader, args.cookies_from_browser, args.cookie_file)
         do_login(loader, args)
+        if args.login:
+            apply_web_headers(loader)
     except instaloader.BadCredentialsException:
         print("[x] 密码错误。")
         return 1
